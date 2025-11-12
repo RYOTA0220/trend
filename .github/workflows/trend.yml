@@ -2,49 +2,47 @@ name: Push Twittrend to LINE Group
 
 on:
   schedule:
-    # 例: 毎時 02分 / 32分（お好みで変更OK）
-    - cron: "2,32 * * * *"
-  workflow_dispatch:
+    - cron: "0 22 * * *"  # JST 07:00
+    - cron: "0 3 * * *"   # JST 12:00
+    - cron: "0 9 * * *"   # JST 18:00
+    - cron: "0 12 * * *"  # JST 21:00
+  workflow_dispatch:      # 手動実行も可
+
+# 併走防止（同時に2本走らないように）
+concurrency:
+  group: trend-group
+  cancel-in-progress: false
+
+# ログのタイムゾーンをJSTで表示
+env:
+  TZ: Asia/Tokyo
+
+permissions:
+  contents: read
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # Node を入れる（※ lock file が無いので cache オプションは使わない）
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # ✅ Playwright と npm キャッシュ（lock file なしでもOKな方法）
-      - name: Cache Playwright and npm
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/ms-playwright
-            ~/.npm
-          # lock file が無くても動くように固定キーでOK（必要なら v2 に変えるだけでリフレッシュ）
-          key: ${{ runner.os }}-playwright-npm-cache-v1
-          restore-keys: |
-            ${{ runner.os }}-playwright-npm-cache-
+      # 依存は package.json が無くてもOK。必要モジュールだけ入れる。
+      - name: Install npm packages (playwright, axios)
+        run: npm i playwright axios
 
-      # 依存導入（package.json なし運用）
-      - run: npm i playwright axios
+      # Playwright の Chromium と依存ライブラリを入れる
+      - name: Install Playwright Chromium (with OS deps)
+        run: npx playwright install --with-deps chromium
 
-      # ブラウザ（キャッシュがあれば一瞬）
-      - run: npx playwright install --with-deps chromium
-
-      # 実行
-      - name: run scrape.js
-        run: node scrape.js
+      # スクレイパー実行（scrape.js はリポジトリ直下にある想定）
+      - name: Run scraper
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_TARGET_GROUP_ID:     ${{ secrets.LINE_TARGET_GROUP_ID }}
-on:
-  schedule:
-    - cron: "0 22 * * *"  # JST 07:00
-    - cron: "0 3 * * *"   # JST 12:00
-    - cron: "0 9 * * *"   # JST 18:00
-    - cron: "0 12 * * *"  # JST 21:00
-  workflow_dispatch:
+          LINE_TARGET_GROUP_ID: ${{ secrets.LINE_TARGET_GROUP_ID }}
+        run: node scrape.js
