@@ -13,7 +13,15 @@ jobs:
         with:
           node-version: "20"
       - run: npm i axios cheerio
-      - run: node scrape.js
+      # まずはトークン/グループIDが正しいかテスト送信
+      - name: send test
+        run: node send_test.js
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_TARGET_GROUP_ID: ${{ secrets.LINE_TARGET_GROUP_ID }}
+      # テストが通ったら本処理
+      - name: run scrape
+        run: node scrape.js
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_TARGET_GROUP_ID: ${{ secrets.LINE_TARGET_GROUP_ID }}
