@@ -1,12 +1,12 @@
 name: Push Twittrend to LINE Group
 
 on:
-  workflow_dispatch:    # 手動実行も残す（任意）
-  schedule:             # すべて UTC（JST は UTC+9）
-    - cron: '0 21 * * *'  # 毎日 06:00 JST
-    - cron: '0 3  * * *'  # 毎日 12:00 JST
-    - cron: '0 9  * * *'  # 毎日 18:00 JST
-    - cron: '0 12 * * *'  # 毎日 21:00 JST
+  workflow_dispatch:    # 手動実行も可能
+  schedule:             # すべてUTC（JSTは+9）
+    - cron: '0 21 * * *'  # 06:00 JST
+    - cron: '0 3  * * *'  # 12:00 JST
+    - cron: '0 9  * * *'  # 18:00 JST
+    - cron: '0 12 * * *'  # 21:00 JST
 
 jobs:
   run:
