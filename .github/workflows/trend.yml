@@ -2,47 +2,64 @@ name: Push Twittrend to LINE Group
 
 on:
   schedule:
-    - cron: "0 22 * * *"  # JST 07:00
-    - cron: "0 3 * * *"   # JST 12:00
-    - cron: "0 8 * * *"   # JST 17:00
-    - cron: "0 11 * * *"  # JST 20:00
-  workflow_dispatch:      # 手動実行も可
+    - cron: '0 21 * * *'   # 06:00 JST
+    - cron: '0 3  * * *'   # 12:00 JST
+    - cron: '0 8  * * *'   # 17:00 JST
+    - cron: '0 11 * * *'   # 20:00 JST
+  workflow_dispatch:
+  repository_dispatch:
+    types: [trigger-trend]
 
-# 併走防止（同時に2本走らないように）
 concurrency:
-  group: trend-group
-  cancel-in-progress: false
-
-# ログのタイムゾーンをJSTで表示
-env:
-  TZ: Asia/Tokyo
-
-permissions:
-  contents: read
+  group: trend-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Use Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
+          cache: 'npm'
 
-      # 依存は package.json が無くてもOK。必要モジュールだけ入れる。
-      - name: Install npm packages (playwright, axios)
-        run: npm i playwright axios
+      # Playwright のブラウザキャッシュ（超重要）
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-pw-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-pw-
 
-      # Playwright の Chromium と依存ライブラリを入れる
-      - name: Install Playwright Chromium (with OS deps)
-        run: npx playwright install --with-deps chromium
+      # apt のキャッシュも活用（初回は時間かかるけど、次回から速い）
+      - name: Cache APT
+        uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/apt
+            /var/lib/apt/lists
+          key: ${{ runner.os }}-apt-cache
 
-      # スクレイパー実行（scrape.js はリポジトリ直下にある想定）
+      - name: Install npm deps
+        run: npm i
+        # 例: axios cheerio playwright など package.json に書いておく
+
+      # Playwright のセットアップを高速化（公式アクション）
+      - name: Setup Playwright
+        uses: microsoft/playwright-github-action@v1
+        with:
+          working-directory: .
+          # ブラウザはキャッシュから復元される
+
+      # ここからあなたの送信用スクリプト
       - name: Run scraper
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_TARGET_GROUP_ID: ${{ secrets.LINE_TARGET_GROUP_ID }}
         run: node scrape.js
