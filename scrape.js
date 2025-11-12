@@ -1,5 +1,5 @@
-// 現在（左端列）の「21位以下を見る」をクリック → その列から 1〜50位を取得して
-// 1順位ごとに改行して LINE に送信する高速版。
+// 現在（左端列）の「21位以下を見る」をクリック → 1〜50位を取得
+// 10件ずつ「改行ありの別バブル」でLINE送信して見やすく表示
 const { chromium } = require("playwright");
 const axios = require("axios");
 
@@ -10,36 +10,35 @@ const URL = "https://twittrend.jp/";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
-// ---- LINE送信ユーティリティ（400回避） ----
+// ---- LINE送信ユーティリティ ----
 const sanitize = (s) =>
   (s || "")
     .replace(/[\u0000-\u001F\u007F]/g, "")
     .replace(/[ \t\v\f]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n");
-const split1000 = (s) => (sanitize(s).match(/[\s\S]{1,1000}/g) || []);
 
 async function pushText(text) {
-  if (!text?.trim()) return;
-  await axios.post(
-    LINE_PUSH_API,
-    { to: GROUP_ID, messages: [{ type: "text", text }] },
-    {
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      timeout: 30000,
-    }
-  );
+  const payload = {
+    to: GROUP_ID,
+    messages: [{ type: "text", text: sanitize(text) }],
+  };
+  await axios.post(LINE_PUSH_API, payload, {
+    headers: {
+      Authorization: `Bearer ${TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    timeout: 30000,
+  });
 }
-async function pushChunks(full) {
-  for (const part of split1000(full)) {
-    await pushText(part);
+
+async function pushMany(bubbles) {
+  for (const b of bubbles) {
+    await pushText(b);
     await new Promise((r) => setTimeout(r, 300));
   }
 }
 
-// ---- スクレイピング本体（通信ブロックで高速化） ----
+// ---- スクレイピング本体（高速化） ----
 async function scrapeTrends() {
   const browser = await chromium.launch({
     headless: true,
@@ -52,7 +51,7 @@ async function scrapeTrends() {
   });
   const page = await context.newPage();
 
-  // 画像/フォント/広告をブロック → 軽量化
+  // 不要リソースをブロック（軽量化）
   await page.route("**/*", (route) => {
     const type = route.request().resourceType();
     const url = route.request().url();
@@ -64,7 +63,7 @@ async function scrapeTrends() {
   try {
     await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 45000 });
 
-    // 4列の「21位以下を見る」から、x座標が最小（左端＝現在）のボタンを選ぶ
+    // 左端（=現在）の「21位以下を見る」ボタンを特定
     const btns = page.locator('text=21位以下を見る');
     const n = await btns.count();
     if (!n) throw new Error('「21位以下を見る」ボタンが見つかりません');
@@ -82,11 +81,10 @@ async function scrapeTrends() {
     }
     if (!target) throw new Error("左端ボタン特定失敗");
 
-    // クリック（Playwrightが見える位置まで自動スクロールしてくれる）
     await target.click({ timeout: 5000 });
-    await page.waitForTimeout(600); // 展開待ち
+    await page.waitForTimeout(700); // 展開待ち
 
-    // クリックした「列コンテナ」から 1〜50 を抽出
+    // クリックした列から1〜50位を抽出
     const items = await target.evaluate((el) => {
       const visText = (n) => {
         const cs = getComputedStyle(n);
@@ -105,8 +103,6 @@ async function scrapeTrends() {
         const rows = [];
         root.querySelectorAll("ol li, ul li").forEach((li) => rows.push(visText(li)));
         root.querySelectorAll("a[href*='/trend/']").forEach((a) => rows.push(visText(a)));
-
-        // 正規化（「1. 語」「29,984件のツイート」を除去、1..50のみ、重複排除）
         const map = new Map();
         for (const s of rows) {
           const t = s.replace(/(\d{1,3}(?:,\d{3})*)件のツイート/g, "").trim();
@@ -141,16 +137,32 @@ async function scrapeTrends() {
   }
 }
 
-// ---- 実行（1位ごとに改行して送信） ----
+// ---- 実行（10件ずつ別バブル＋順位ごと改行）----
 (async () => {
   try {
-    const ranks = await scrapeTrends();
+    const ranks = await scrapeTrends(); // ["1位 〇〇", ... "50位 △△"]
+
     const header =
       `🕒 現在のＸトレンド（1〜50位）\n` +
       new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
 
-    const body = ranks?.length ? ranks.map((s) => `・${s}`).join("\n") : "※ 取得できませんでした。";
-    await pushChunks(`${header}\n\n${body}`);
+    if (!ranks?.length) {
+      await pushText(`${header}\n\n※ 取得できませんでした。`);
+      return;
+    }
+
+    // 1行ずつ（・付き）にして配列化
+    const lines = ranks.map((s) => `・${s}`);
+
+    // 10件ごとに分割して別バブルで送信（改行は \n）
+    const bubbles = [];
+    for (let i = 0; i < lines.length; i += 10) {
+      const slice = lines.slice(i, i + 10).join("\n");
+      const rangeLabel = `${i + 1}〜${Math.min(i + 10, lines.length)}位`;
+      bubbles.push(`${i === 0 ? header + "\n\n" : `（続き：${rangeLabel}）\n\n`}${slice}`);
+    }
+
+    await pushMany(bubbles);
   } catch (err) {
     try {
       await pushText(`❗スクレイプ失敗: ${String(err).slice(0, 200)}`);
