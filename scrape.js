@@ -1,158 +1,81 @@
-// 現在（左端列）の「21位以下を見る」をクリック → 1〜50位を取得
-// 1通のメッセージで「順位ごとに改行」して送信
-const { chromium } = require("playwright");
-const axios = require("axios");
+// scrape.js
 
-const TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-const GROUP_ID = process.env.LINE_TARGET_GROUP_ID;
-const LINE_PUSH_API = "https://api.line.me/v2/bot/message/push";
-const URL = "https://twittrend.jp/";
-const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+const { chromium } = require('playwright');
+const axios = require('axios');
 
-// ---- LINE送信ユーティリティ ----
-// 改行(\n, \r)は残す！それ以外の制御文字だけ除去する。
-const sanitize = (s) =>
-  (s || "")
-    .replace(/[\u0000-\u0009\u000B\u000C\u000E-\u001F\u007F]/g, "") // \n(\u000A)と\r(\u000D)は除外
-    .replace(/\u2028|\u2029/g, "\n") // Unicodeの改行は通常改行に
-    .replace(/[ \t\v\f]+\r?\n/g, "\n"); // 改行前の余分な空白を整理
+// —— 例外は必ずログへ ——
+process.on('unhandledRejection', (e) => {
+  console.error('[unhandledRejection]', e?.stack || e);
+  process.exit(1);
+});
+process.on('uncaughtException', (e) => {
+  console.error('[uncaughtException]', e?.stack || e);
+  process.exit(1);
+});
 
-async function pushText(text) {
-  const payload = {
-    to: GROUP_ID,
-    messages: [{ type: "text", text: sanitize(text) }],
-  };
-  await axios.post(LINE_PUSH_API, payload, {
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    timeout: 30000,
-  });
+const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN; // GitHub Secrets
+const LINE_TO_ID = process.env.LINE_TO_ID;                 // 送信先（グループID or userId）
+const LINE_API = 'https://api.line.me/v2/bot/message/push';
+
+const log = (...a) => console.log('[scrape]', ...a);
+
+async function sendLineText(to, text) {
+  if (!LINE_TOKEN) throw new Error('LINE_CHANNEL_ACCESS_TOKEN が未設定です（GitHub Secrets）');
+  const headers = { Authorization: `Bearer ${LINE_TOKEN}` };
+  try {
+    const res = await axios.post(LINE_API, { to, messages: [{ type: 'text', text }] }, { headers });
+    log('LINE push status', res.status);
+  } catch (err) {
+    console.error('[LINE push error]', err.message, err.response?.data || '');
+    throw err;
+  }
 }
 
-// ---- スクレイピング本体（高速化） ----
-async function scrapeTrends() {
+async function scrapeTwittrend() {
   const browser = await chromium.launch({
     headless: true,
-    args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   });
-  const context = await browser.newContext({
-    userAgent: UA,
-    locale: "ja-JP",
-    viewport: { width: 1200, height: 1600 },
-  });
-  const page = await context.newPage();
-
-  // 不要リソースをブロック（軽量化）
-  await page.route("**/*", (route) => {
-    const type = route.request().resourceType();
-    const url = route.request().url();
-    if (["image", "font", "media", "stylesheet"].includes(type)) return route.abort();
-    if (/\b(ads|doubleclick|googletag|adservice|taboola|criteo)\b/i.test(url)) return route.abort();
-    route.continue();
-  });
+  const page = await browser.newPage({ viewport: { width: 1366, height: 1200 } });
 
   try {
-    await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 45000 });
+    log('open twittrend');
+    await page.goto('https://twittrend.jp/', { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-    // 左端（=現在）の「21位以下を見る」ボタンを特定
-    const btns = page.locator('text=21位以下を見る');
-    const n = await btns.count();
-    if (!n) throw new Error('「21位以下を見る」ボタンが見つかりません');
+    // 「日本のトレンド」→ 左端「現在」列の存在を待つ
+    await page.waitForSelector('section:has(h2:has-text("現在"))', { timeout: 30000 });
 
-    let target = null;
-    let minX = Infinity;
-    for (let i = 0; i < n; i++) {
-      const b = btns.nth(i);
-      if (!(await b.isVisible().catch(() => false))) continue;
-      const box = await b.boundingBox();
-      if (box && box.x < minX) {
-        minX = box.x;
-        target = b;
-      }
-    }
-    if (!target) throw new Error("左端ボタン特定失敗");
+    // 左端「現在」列の「21位以下を見る」を押す（4列の一番左だけ）
+    const moreBtn = page.locator('section:has(h2:has-text("現在")) button:has-text("21位以下を")').first();
+    await moreBtn.scrollIntoViewIfNeeded();
+    await moreBtn.click({ timeout: 15000 });
 
-    await target.click({ timeout: 5000 });
-    await page.waitForTimeout(700); // 展開待ち
+    // 50位まで描画されるのを待つ
+    await page.waitForFunction(
+      () => document.querySelectorAll('section:has(h2:has-text("現在")) ol li').length >= 50,
+      { timeout: 30000 }
+    );
 
-    // クリックした列から1〜50位を抽出
-    const items = await target.evaluate((el) => {
-      const visText = (n) => {
-        const cs = getComputedStyle(n);
-        if (cs.display === "none" || cs.visibility === "hidden" || +cs.opacity === 0) return "";
-        return (n.textContent || "").replace(/\s+/g, " ").trim();
-      };
-      const hasRankish = (n) => n.querySelector("ol li, ul li, [data-rank], a[href*='/trend/']");
-      let col = el;
-      for (let i = 0; i < 10 && col; i++) {
-        col = col.parentElement;
-        if (col && hasRankish(col)) break;
-      }
-      if (!col) col = document.body;
+    // 1〜50位を取得（順位ごとに改行）
+    const items = await page.locator('section:has(h2:has-text("現在")) ol li').allTextContents();
+    const top50 = items.slice(0, 50).map((t, i) => `${i + 1}位 ${t.replace(/\s+/g, ' ').trim()}`);
 
-      const extract = (root) => {
-        const rows = [];
-        root.querySelectorAll("ol li, ul li").forEach((li) => rows.push(visText(li)));
-        root.querySelectorAll("a[href*='/trend/']").forEach((a) => rows.push(visText(a)));
-        const map = new Map();
-        for (const s of rows) {
-          const t = s.replace(/(\d{1,3}(?:,\d{3})*)件のツイート/g, "").trim();
-          const m = t.match(/^(\d+)[\.\s]*\s*(.*)$/);
-          if (!m) continue;
-          const rank = +m[1];
-          const word = (m[2] || "").trim();
-          if (rank >= 1 && rank <= 50 && word && !map.has(rank)) map.set(rank, word);
-        }
-        return Array.from(map.entries())
-          .sort((a, b) => a[0] - b[0])
-          .map(([r, w]) => `${r}位 ${w}`);
-      };
-
-      let list = extract(col);
-      if (list.length < 30 && col.parentElement) {
-        const up = extract(col.parentElement);
-        if (up.length > list.length) list = up;
-      }
-      if (list.length < 10) {
-        const all = extract(document.body);
-        if (all.length > list.length) list = all;
-      }
-      return list.slice(0, 50);
-    });
-
-    await browser.close();
-    return items;
-  } catch (e) {
-    await browser.close();
-    throw e;
+    const ts = new Date().toLocaleString('ja-JP', { hour12: false });
+    const header = `🕒 現在のＸトレンド（1〜50位）\n${ts}`;
+    return `${header}\n${top50.join('\n')}`;
+  } finally {
+    await page.close().catch(() => {});
+    await browser.close().catch(() => {});
   }
 }
 
-// ---- 実行（1通で改行して送信）----
 (async () => {
-  try {
-    const ranks = await scrapeTrends(); // ["1位 〇〇", ... "50位 △△"]
+  const text = await scrapeTwittrend();
 
-    const header =
-      `🕒 現在のＸトレンド（1〜50位）\n` +
-      new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
-
-    if (!ranks?.length) {
-      await pushText(`${header}\n\n※ 取得できませんでした。`);
-      return;
-    }
-
-    // 1行ずつ（・付き）で \n 連結（sanitize で改行は保持）
-    const body = ranks.map((s) => `・${s}`).join("\n");
-
-    await pushText(`${header}\n\n${body}`);
-  } catch (err) {
-    try {
-      await pushText(`❗スクレイプ失敗: ${String(err).slice(0, 200)}`);
-    } catch {}
-    process.exit(1);
+  if (!LINE_TO_ID) {
+    log('プレビュー（LINE_TO_ID 未設定）\n' + text.slice(0, 500) + ' ...');
+  } else {
+    await sendLineText(LINE_TO_ID, text);
   }
+  log('done');
 })();
