@@ -1,95 +1,108 @@
-// scrape.js - Twittrend「現在」トレンド1〜50位を取得してLINEに送信
-// 必要な環境変数: LINE_CHANNEL_ACCESS_TOKEN, LINE_GROUP_ID
+// scrape.js - Twittrend「現在」1〜50位を取得してLINEに送信
+// 必須Secrets: LINE_CHANNEL_ACCESS_TOKEN, LINE_GROUP_ID
 
 const { chromium } = require('playwright');
 const axios = require('axios');
 
-const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-const LINE_TO = process.env.LINE_GROUP_ID;
-
-if (!LINE_TOKEN || !LINE_TO) {
-  console.error("環境変数が足りません: LINE_CHANNEL_ACCESS_TOKEN と LINE_GROUP_ID を設定してください。");
+// ---- 例外は必ずログに出して終了 ----
+process.on('unhandledRejection', (e) => {
+  console.error('[unhandledRejection]', e?.stack || e);
   process.exit(1);
+});
+process.on('uncaughtException', (e) => {
+  console.error('[uncaughtException]', e?.stack || e);
+  process.exit(1);
+});
+
+// ---- 環境変数（GitHub Secrets）----
+const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN; // Botのチャネルアクセストークン
+const LINE_TO    = process.env.LINE_GROUP_ID;             // 送信先グループID（roomIdでも可）
+
+// ---- 定数 ----
+const TWITTREND_URL = 'https://twittrend.jp/';
+const LINE_PUSH_API = 'https://api.line.me/v2/bot/message/push';
+
+const log = (...a) => console.log('[scrape]', ...a);
+
+// ---- LINE送信 ----
+async function sendLineText(to, text) {
+  if (!LINE_TOKEN) throw new Error('LINE_CHANNEL_ACCESS_TOKEN が未設定です');
+  if (!to)        throw new Error('LINE_GROUP_ID が未設定です');
+
+  const headers = {
+    'Authorization': `Bearer ${LINE_TOKEN}`,
+    'Content-Type': 'application/json',
+  };
+  const body = { to, messages: [{ type: 'text', text }] };
+
+  const res = await axios.post(LINE_PUSH_API, body, { headers });
+  log('LINE push status', res.status);
 }
 
-const TWITTREND_URL = 'https://twittrend.jp/';
-
+// ---- Twittrend「現在」列を1〜50位まで取得 ----
 async function scrapeNowTop50(page) {
-  // 左端の「現在」リストのみを操作
-  const list = page.locator('#list_now li');
-  const moreBtn = page.locator('#more_btn_now');
+  // 左端の「現在」列は安定したIDが付いている
+  //   ・現在のリスト:  #list_now > li
+  //   ・21位以下ボタン: #more_btn_now
+  // まずDOMが生えるのを待つ
+  await page.waitForSelector('#list_now li', { timeout: 30000 });
 
-  // 一旦ページを少し下にスクロール（描画安定）
+  // ちらつき対策で少しスクロール＆待機
   await page.mouse.wheel(0, 800);
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(700);
 
-  // リストが20件以上あることを確認（初期状態）
-  await list.nth(0).waitFor({ state: 'visible', timeout: 15000 });
-
-  // 「21位以下を見る」ボタンが見えるまで待ってクリック
+  // 「21位以下を見る」を押す（左端列のみ）
+  const moreBtn = page.locator('#more_btn_now');
   await moreBtn.scrollIntoViewIfNeeded();
   await moreBtn.waitFor({ state: 'visible', timeout: 10000 });
   await moreBtn.click({ timeout: 10000 });
 
-  // liが50件になるまで待機（確実な方法）
+  // liが50件になるまで待つ（これが一番確実）
   await page.waitForFunction(() => {
     const els = document.querySelectorAll('#list_now li');
     return els && els.length >= 50;
-  }, { timeout: 15000 });
+  }, { timeout: 20000 });
 
-  // リストを取得（最大50件）
-  const count = await list.count();
-  const max = Math.min(count, 50);
-  const ranks = [];
-  for (let i = 0; i < max; i++) {
-    const t = (await list.nth(i).innerText()).trim();
-    const cleaned = t.replace(/^\s*\d+\.\s*/, '');
-    ranks.push(`${i + 1}位 ${cleaned}`);
-  }
+  // 取得
+  const items = await page.locator('#list_now li').allInnerTexts();
+  const top50 = items.slice(0, 50).map((t, i) => {
+    // 先頭の「1. 〜」などを消して整形
+    const cleaned = t.replace(/^\s*\d+\.\s*/, '').replace(/\s+/g, ' ').trim();
+    return `${i + 1}位 ${cleaned}`;
+  });
 
-  return ranks;
+  return top50;
 }
 
-async function sendToLine(text) {
-  const headers = {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${LINE_TOKEN}`,
-  };
-  const body = {
-    to: LINE_TO,
-    messages: [{ type: 'text', text }],
-  };
-  const url = 'https://api.line.me/v2/bot/message/push';
-  const res = await axios.post(url, body, { headers });
-  return res.status;
-}
-
+// ---- メイン ----
 (async () => {
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1280, height: 2000 } });
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+  });
+  const page = await browser.newPage({ viewport: { width: 1366, height: 2000 } });
 
   try {
-    await page.goto(TWITTREND_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    log('open', TWITTREND_URL);
+    await page.goto(TWITTREND_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
     const ranks = await scrapeNowTop50(page);
 
-    const now = new Date();
-    const jp = new Intl.DateTimeFormat('ja-JP', {
+    const ts = new Intl.DateTimeFormat('ja-JP', {
       year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit',
       hour12: false, timeZone: 'Asia/Tokyo'
-    }).format(now);
+    }).format(new Date());
 
-    const header = `🕐 現在のＸトレンド（1〜50位）\n${jp}`;
-    const body = ranks.join('\n');
-    const payload = `${header}\n\n${body}`;
+    const header = `🕐 現在のＸトレンド（1〜50位）\n${ts}`;
+    const text = `${header}\n\n${ranks.join('\n')}`;
 
-    const status = await sendToLine(payload);
-    console.log('LINE push status:', status);
+    await sendLineText(LINE_TO, text);
+    log('done');
   } catch (e) {
     console.error('[SCRAPE ERROR]', e?.message || e);
-    try {
-      await sendToLine(`⚠️ 取得失敗: ${e?.message || e}`);
-    } catch {}
+    // 失敗も通知（通知で原因追跡が楽）
+    try { await sendLineText(LINE_TO, `⚠️ 取得失敗: ${e?.message || e}`); } catch {}
     process.exit(1);
   } finally {
     await page.close().catch(() => {});
