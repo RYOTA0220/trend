@@ -22,13 +22,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Use Node 20 (no npm cache to avoid lockfile error)
+      - name: Use Node 20 (no npm cache)
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          # cache: 'npm' は使用しない（lock ファイル必須のためエラーになる）
 
-      # Playwright ブラウザをキャッシュ（鍵は package.json で計算）
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -37,7 +35,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pw-
 
-      # APT キャッシュ（任意・入れておくと次回以降が少し速い）
       - name: Cache APT
         uses: actions/cache@v4
         with:
@@ -46,17 +43,14 @@ jobs:
             /var/lib/apt/lists
           key: ${{ runner.os }}-apt-cache
 
-      # package.json が無い場合の保険（初回でも必ず動くように）
       - name: Ensure package.json & base deps
         run: |
           if [ ! -f package.json ]; then
             npm init -y
           fi
-          # 依存は必要に応じて追加してください
           npm i --no-audit --no-fund axios cheerio playwright
 
-      # lock があれば npm ci、無ければ npm i
-      - name: Install deps
+      - name: Install deps (lock 有無で切替)
         run: |
           if [ -f package-lock.json ]; then
             npm ci --no-audit --no-fund
@@ -64,11 +58,10 @@ jobs:
             npm i  --no-audit --no-fund
           fi
 
-      # Playwright のセットアップ（ブラウザはキャッシュから復元される想定）
-      - name: Setup Playwright
-        uses: microsoft/playwright-github-action@v1
+      # ★ Playwright をアクションではなく npx でインストール（OS 依存も含めて入る）
+      - name: Install Playwright (with system deps)
+        run: npx playwright install --with-deps chromium
 
-      # スクレイプ実行（あなたの既存スクリプト名のままでOK）
       - name: Run scraper
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
