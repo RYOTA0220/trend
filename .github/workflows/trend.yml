@@ -1,47 +1,22 @@
+# .github/workflows/trend.yml
 name: Push Twittrend to LINE Group
 
 on:
   repository_dispatch:
-    types: [run-scrape]
-  workflow_dispatch: {}
-  schedule:
-    # JST: 6:00, 12:00, 17:00, 20:00
-    - cron: '0 21 * * *'
-    - cron: '0 3  * * *'
-    - cron: '0 8  * * *'
-    - cron: '0 11 * * *'
+    types: [twittrend_request]   # ← これが “合言葉”
+  workflow_dispatch:             # 手動実行も可
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install deps (playwright & axios)
-        run: |
-          npm i -y playwright@1.48.2 axios
-
-      - name: Install Chromium for Playwright
-        run: npx playwright install --with-deps chromium
-
-      # 2回目以降を速くする（ms-playwright キャッシュ）
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-msplaywright-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: ${{ runner.os }}-msplaywright-
-
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm i playwright axios
+      - run: npx playwright install --with-deps chromium
       - name: Run scraper
+        run: node scrape.js
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_GROUP_ID: ${{ vars.LINE_GROUP_ID }}
-        run: node scrape.js
+          LINE_GROUP_ID: ${{ secrets.LINE_GROUP_ID }}
