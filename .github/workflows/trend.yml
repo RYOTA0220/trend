@@ -1,35 +1,32 @@
 name: Push Twittrend to LINE Group
 
 on:
-  workflow_dispatch:
-  repository_dispatch:
-    types: [line_trend_request]
-  schedule:
-    - cron: '0 21,3,9,12 * * *'   # JST 06,12,18,21 に相当（UTCで設定）
+  workflow_dispatch:    # 手動実行も残す（任意）
+  schedule:             # すべて UTC（JST は UTC+9）
+    - cron: '0 21 * * *'  # 毎日 06:00 JST
+    - cron: '0 3  * * *'  # 毎日 12:00 JST
+    - cron: '0 9  * * *'  # 毎日 18:00 JST
+    - cron: '0 12 * * *'  # 毎日 21:00 JST
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    env:
-      PLAYWRIGHT_BROWSERS_PATH: ~/.cache/ms-playwright
+    concurrency:
+      group: trend
+      cancel-in-progress: false
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Use Node 20
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
 
-      # ★ Chromium(約100MB)をキャッシュ → 2回目以降はDLスキップ
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: pw-browsers-${{ runner.os }}-v1194
-
-      - name: Install deps (playwright only)
+      - name: Install deps (playwright & axios)
         run: |
-          npm i playwright
+          npm i -g npm@latest
+          npm i axios@1 playwright@1
           npx playwright install --with-deps chromium
 
       - name: Run scraper
