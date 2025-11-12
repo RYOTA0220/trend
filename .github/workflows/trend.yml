@@ -1,68 +1,48 @@
 name: Push Twittrend to LINE Group
 
 on:
-  schedule:
-    - cron: '0 21 * * *'   # 06:00 JST
-    - cron: '0 3  * * *'   # 12:00 JST
-    - cron: '0 8  * * *'   # 17:00 JST
-    - cron: '0 11 * * *'   # 20:00 JST
-  workflow_dispatch:
+  # 手動実行
+  workflow_dispatch: {}
+
+  # Cloudflare Worker から即時実行（repository_dispatch）
   repository_dispatch:
-    types: [trigger-trend]
+    types: [run-trend]
+
+  # 定期実行（GitHub は UTC。JST 06/12/17/20 = UTC 21/03/08/11）
+  schedule:
+    - cron: '0 21 * * *'  # 06:00 JST
+    - cron: '0 3 * * *'   # 12:00 JST
+    - cron: '0 8 * * *'   # 17:00 JST
+    - cron: '0 11 * * *'  # 20:00 JST
 
 concurrency:
-  group: trend-${{ github.ref }}
-  cancel-in-progress: true
+  group: trend-run
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Use Node 20 (no npm cache)
+      - name: Use Node 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          # ※ lockfile が無いと cache エラーになるため cache は使わない
 
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-pw-${{ hashFiles('package.json') }}
-          restore-keys: |
-            ${{ runner.os }}-pw-
+      - name: Install npm deps (playwright & axios)
+        run: npm i playwright axios
 
-      - name: Cache APT
-        uses: actions/cache@v4
-        with:
-          path: |
-            /var/cache/apt
-            /var/lib/apt/lists
-          key: ${{ runner.os }}-apt-cache
-
-      - name: Ensure package.json & base deps
-        run: |
-          if [ ! -f package.json ]; then
-            npm init -y
-          fi
-          npm i --no-audit --no-fund axios cheerio playwright
-
-      - name: Install deps (lock 有無で切替)
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci --no-audit --no-fund
-          else
-            npm i  --no-audit --no-fund
-          fi
-
-      # ★ Playwright をアクションではなく npx でインストール（OS 依存も含めて入る）
       - name: Install Playwright (with system deps)
         run: npx playwright install --with-deps chromium
 
       - name: Run scraper
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_TO_ID: ${{ secrets.LINE_TO_ID }}
+          DEBUG: pw:api
         run: node scrape.js
