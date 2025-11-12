@@ -1,28 +1,25 @@
-name: Push Twittrend to LINE Group
+name: Push Twitttrend to LINE Group
 
 on:
-  # 手動実行
-  workflow_dispatch: {}
-
-  # Cloudflare Worker から即時実行（repository_dispatch）
+  workflow_dispatch:
   repository_dispatch:
-    types: [run-trend]
-
-  # 定期実行（GitHub は UTC。JST 06/12/17/20 = UTC 21/03/08/11）
+    types: [line-trend-request]
   schedule:
-    - cron: '0 21 * * *'  # 06:00 JST
-    - cron: '0 3 * * *'   # 12:00 JST
-    - cron: '0 8 * * *'   # 17:00 JST
-    - cron: '0 11 * * *'  # 20:00 JST
-
-concurrency:
-  group: trend-run
-  cancel-in-progress: false
+    # JST 6,12,17,20時（UTCに直すと 21,03,08,11 を指定）
+    - cron: '0 21 * * *'
+    - cron: '0 3 * * *'
+    - cron: '0 8 * * *'
+    - cron: '0 11 * * *'
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+
+    # ここで Secrets をプロセス環境変数に渡す
+    env:
+      LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+      LINE_GROUP_ID: ${{ secrets.LINE_GROUP_ID }}
 
     steps:
       - name: Checkout
@@ -32,17 +29,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          # ※ lockfile が無いと cache エラーになるため cache は使わない
 
-      - name: Install npm deps (playwright & axios)
-        run: npm i playwright axios
-
-      - name: Install Playwright (with system deps)
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright (chromium only) and deps
+        run: |
+          npm i playwright axios
+          npx playwright install --with-deps chromium
 
       - name: Run scraper
-        env:
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_TO_ID: ${{ secrets.LINE_TO_ID }}
-          DEBUG: pw:api
         run: node scrape.js
