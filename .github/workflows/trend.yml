@@ -4,8 +4,8 @@ on:
   schedule:
     - cron: "0 22 * * *"  # JST 07:00
     - cron: "0 3 * * *"   # JST 12:00
-    - cron: "0 9 * * *"   # JST 18:00
-    - cron: "0 12 * * *"  # JST 21:00
+    - cron: "0 8 * * *"   # JST 17:00
+    - cron: "0 11 * * *"  # JST 20:00
   workflow_dispatch:      # 手動実行も可
 
 # 併走防止（同時に2本走らないように）
