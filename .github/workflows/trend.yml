@@ -1,41 +1,44 @@
 name: Push Twittrend to LINE Group
 
 on:
-  workflow_dispatch:
   repository_dispatch:
     types: [run-scrape]
+  workflow_dispatch: {}
   schedule:
-    # JST(UTC+9) の 06:00 / 12:00 / 17:00 / 20:00
-    # (= UTC 21:00 / 03:00 / 08:00 / 11:00)
-    - cron: '0 21,3,8,11 * * *'
+    # JST 6,12,17,20 → UTC 21,03,08,11（※サマータイム無し前提）
+    - cron: '0 21 * * *'
+    - cron: '0 3 * * *'
+    - cron: '0 8 * * *'
+    - cron: '0 11 * * *'
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    container: mcr.microsoft.com/playwright:v1.49.0-jammy
-    env:
-      LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-      LINE_GROUP_ID: ${{ secrets.LINE_GROUP_ID }}
-
+    timeout-minutes: 8
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Use Node 20
         uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+        with: { node-version: '20' }
 
       - name: Install deps (playwright & axios)
         run: |
-          npm init -y >/dev/null 2>&1 || true
-          npm i playwright@1.49.0 axios
+          npm i playwright-core axios
+          echo "install ok"
 
-      # ← デバッグ用: Secretsが渡っているか長さだけチェック（中身は出さない）
+      - name: Install Playwright browsers (Chromium headless shell)
+        run: |
+          node -e "console.log('skip playwright install (using core)')"
+
       - name: Debug env presence
         run: |
-          test -n "${LINE_CHANNEL_ACCESS_TOKEN}" && echo "LINE_CHANNEL_ACCESS_TOKEN: OK" || (echo "MISSING"; exit 1)
-          test -n "${LINE_GROUP_ID}" && echo "LINE_GROUP_ID: OK" || (echo "MISSING"; exit 1)
+          [[ -n "${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}" ]] && echo "LINE_CHANNEL_ACCESS_TOKEN: OK" || (echo "NG"; exit 1)
+          [[ -n "${{ secrets.LINE_GROUP_ID }}" ]] && echo "LINE_GROUP_ID: OK" || (echo "NG"; exit 1)
 
       - name: Run scraper
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_GROUP_ID: ${{ secrets.LINE_GROUP_ID }}
         run: node scrape.js
