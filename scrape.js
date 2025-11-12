@@ -1,102 +1,113 @@
-// 安定クリック＋50件出現までポーリングで待つ版
-const { chromium } = require('playwright');
+// scrape.js - Twittrend(日本)の「現在」1〜50位を取得してLINEに送る
+// 必要な環境変数: LINE_CHANNEL_ACCESS_TOKEN, LINE_GROUP_ID
+
+const { chromium } = require('playwright'); // CJSでOK
+const axios = require('axios');
 
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-const LINE_TO    = process.env.LINE_GROUP_ID;
+const LINE_TO = process.env.LINE_GROUP_ID;
+
+if (!LINE_TOKEN || !LINE_TO) {
+  console.error("環境変数が足りません: LINE_CHANNEL_ACCESS_TOKEN と LINE_GROUP_ID を設定してください。");
+  process.exit(1);
+}
+
+const TWITTREND_URL = 'https://twittrend.jp/';
+
+// 左端の「現在」カードを確実に掴むロケータ
+async function getNowSection(page) {
+  // 見出しが「現在」の section にスコープ
+  const section = page.locator('section').filter({
+    has: page.getByRole('heading', { name: '現在' })
+  }).first();
+
+  await section.waitFor({ state: 'visible', timeout: 15000 });
+  return section;
+}
+
+async function clickMore21(section) {
+  // セクション内の「21位以下を見る」をクリック（左端に限定）
+  const moreBtn = section.getByRole('button', { name: /21位以下を見る/ });
+  // Playwrightのstrict違反を避けるため first() 明示
+  await moreBtn.first().click({ timeout: 10000 }).catch(async () => {
+    // フォールバック: 既知のID（左端は #more_btn_now）
+    const fallback = section.locator('#more_btn_now');
+    await fallback.click({ timeout: 8000 });
+  });
+}
+
+async function scrapeNowTop50(page) {
+  const section = await getNowSection(page);
+
+  // クリックで展開
+  await clickMore21(section);
+
+  // 1〜50の <ol><li> … を待つ（左端のカード内だけ）
+  const items = section.locator('ol li');
+  await items.nth(49).waitFor({ state: 'visible', timeout: 15000 }); // 0-indexで50番目
+
+  // 抽出
+  const count = await items.count();
+  const max = Math.min(count, 50);
+  const ranks = [];
+  for (let i = 0; i < max; i++) {
+    const t = (await items.nth(i).innerText()).trim();
+    // 「1. キーワード」形式が多いので整形（数字と点を除去）
+    const cleaned = t.replace(/^\s*\d+\.\s*/, '');
+    ranks.push(`${i + 1}位 ${cleaned}`);
+  }
+  return ranks;
+}
+
+async function sendToLine(text) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${LINE_TOKEN}`,
+  };
+  const body = {
+    to: LINE_TO,
+    messages: [{ type: 'text', text }]
+  };
+  const url = 'https://api.line.me/v2/bot/message/push';
+  const res = await axios.post(url, body, { headers });
+  return res.status;
+}
 
 (async () => {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({
-    viewport: { width: 1400, height: 1000 },
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+  const page = await browser.newPage({
+    viewport: { width: 1280, height: 2000 }
   });
-  const page = await context.newPage();
-  page.setDefaultTimeout(45000);
 
   try {
-    // 1) アクセス → 1回だけ下スクロール（ボタン可視化のため）
-    await page.goto('https://twittrend.jp/', { waitUntil: 'domcontentloaded' });
-    await page.mouse.wheel(0, 1200);
+    await page.goto(TWITTREND_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-    // 2) 左端「現在」の“21位以下を見る”を確実クリック（JS直叩き → フォールバック3通り）
-    const clickMoreNow = async () => {
-      // まずID直叩き（最も安定）
-      const ok = await page.evaluate(() => {
-        const btn = document.querySelector('#more_btn_now');
-        if (btn) { (btn as HTMLElement).click(); return true; }
-        return false;
-      });
-      if (ok) return;
-      // 代替1: data-target属性由来の開閉ボタン（稀なケース）
-      const alt1 = page.locator('#more_btn_now, button#more_btn_now');
-      if (await alt1.count()) { await alt1.first().click(); return; }
-      // 代替2: 「現在」セクション内のボタン群からテキスト一致で選択（strict回避）
-      const sec = page.locator("section").filter({ has: page.locator('h2:has-text("現在")') }).first();
-      const cand = sec.locator('button');
-      const n = await cand.count();
-      for (let i = 0; i < n; i++) {
-        const t = (await cand.nth(i).innerText()).trim();
-        if (t.includes('21位以下を見る')) { await cand.nth(i).click(); return; }
-      }
-      throw new Error('「現在」列の 21位以下ボタンが見つかりません');
-    };
-    await clickMoreNow();
+    // 軽くスクロールして初期化
+    await page.mouse.wheel(0, 1000);
+    await page.waitForTimeout(400);
 
-    // 3) 50件出現までポーリング（取りこぼし防止の再クリック付き）
-    const waitListTo50 = async () => {
-      const start = Date.now();
-      let retries = 0;
-      while (Date.now() - start < 15000) {
-        const count = await page.evaluate(() =>
-          document.querySelectorAll('#list_now li').length
-        );
-        if (count >= 50) return;
-        // まだなら軽くスクロールして再クリック（クリック取りこぼし対策）
-        if (retries % 5 === 0) {
-          await page.mouse.wheel(0, 400);
-          await clickMoreNow().catch(() => {});
-        }
-        await page.waitForTimeout(200);
-        retries++;
-      }
-      throw new Error('50位まで表示されませんでした（タイムアウト）');
-    };
-    await waitListTo50();
+    const ranks = await scrapeNowTop50(page);
 
-    // 4) 1〜50のテキスト抽出（左端「現在」列のみ）
-    const lines = await page.evaluate(() => {
-      const items = Array.from(document.querySelectorAll('#list_now li'))
-        .slice(0, 50)
-        .map((li, i) => {
-          const raw = (li.textContent || '').replace(/\s+/g, ' ').trim();
-          // li 先頭に「1.」「1位」等が入っていても綺麗に
-          const cleaned = raw.replace(/^\d+([\.位])?\s*/, '');
-          return `${i + 1}位 ${cleaned}`;
-        });
-      return items;
-    });
+    const now = new Date();
+    const jp = new Intl.DateTimeFormat('ja-JP', {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false, timeZone: 'Asia/Tokyo'
+    }).format(now);
 
-    // 5) LINEへ送信
-    if (!LINE_TOKEN || !LINE_TO) throw new Error('LINE 環境変数が未設定です');
-    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
-    const text = `🕰 現在のＸトレンド（1〜50位）\n${now}\n` + lines.join('\n');
+    const header = `🕐 現在のＸトレンド（1〜50位）\n${jp}`;
+    const body = ranks.join('\n');
+    const payload = `${header}\n\n${body}`;
 
-    const res = await fetch('https://api.line.me/v2/bot/message/push', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${LINE_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ to: LINE_TO, messages: [{ type: 'text', text }] }),
-    });
-    if (!res.ok) throw new Error(`LINE Push failed: ${res.status} ${await res.text()}`);
-
-    await browser.close();
-    process.exit(0);
+    const status = await sendToLine(payload);
+    console.log('LINE push status:', status);
   } catch (e) {
-    console.error('[SCRAPE ERROR]', e);
-    await browser.close();
-    process.exit(1); // ← これが GitHub の “exit code 1”
+    console.error('[SCRAPE ERROR]', e?.message || e);
+    // エラー内容もLINEに通知したい場合は下記を有効化
+    // try { await sendToLine(`⚠️ 取得失敗: ${e?.message || e}`); } catch {}
+    process.exit(1);
+  } finally {
+    await page.close().catch(() => {});
+    await browser.close().catch(() => {});
   }
 })();
