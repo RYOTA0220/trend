@@ -1,22 +1,20 @@
-name: Push Twitttrend to LINE Group
+name: Push Twittrend to LINE Group
 
 on:
   workflow_dispatch:
   repository_dispatch:
-    types: [line-trend-request]
+    types: [run-scrape]
   schedule:
-    # JST 6,12,17,20時（UTCに直すと 21,03,08,11 を指定）
-    - cron: '0 21 * * *'
-    - cron: '0 3 * * *'
-    - cron: '0 8 * * *'
-    - cron: '0 11 * * *'
+    # JST(UTC+9) の 06:00 / 12:00 / 17:00 / 20:00
+    # GitHubはUTCで動くので → 21:00, 03:00, 08:00, 11:00 (毎日)
+    - cron: '0 21,3,8,11 * * *'
 
 jobs:
   run:
+    # Playwright入りコンテナを使って依存関係地獄を回避（速い＆安定）
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    container: mcr.microsoft.com/playwright:v1.49.0-jammy
 
-    # ここで Secrets をプロセス環境変数に渡す
     env:
       LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
       LINE_GROUP_ID: ${{ secrets.LINE_GROUP_ID }}
@@ -30,10 +28,10 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install Playwright (chromium only) and deps
+      - name: Install deps (playwright & axios)
         run: |
-          npm i playwright axios
-          npx playwright install --with-deps chromium
+          npm init -y >/dev/null 2>&1 || true
+          npm i playwright@1.49.0 axios
 
       - name: Run scraper
         run: node scrape.js
