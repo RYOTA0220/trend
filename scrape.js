@@ -1,5 +1,5 @@
 // 現在（左端列）の「21位以下を見る」をクリック → 1〜50位を取得
-// 10件ずつ「改行ありの別バブル」でLINE送信して見やすく表示
+// 1通のメッセージで「順位ごとに確実に改行（CRLF）」して送信
 const { chromium } = require("playwright");
 const axios = require("axios");
 
@@ -13,11 +13,12 @@ const UA =
 // ---- LINE送信ユーティリティ ----
 const sanitize = (s) =>
   (s || "")
-    .replace(/[\u0000-\u001F\u007F]/g, "")
-    .replace(/[ \t\v\f]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n");
+    .replace(/[\u0000-\u001F\u007F]/g, "") // 制御文字除去
+    .replace(/\u2028|\u2029/g, "\r\n")     // Unicode改行もCRLFに統一
+    .replace(/[ \t\v\f]+\r?\n/g, "\r\n");  // 改行前の空白を整理
 
 async function pushText(text) {
+  // 1通で送る（5,000文字制限内）
   const payload = {
     to: GROUP_ID,
     messages: [{ type: "text", text: sanitize(text) }],
@@ -29,13 +30,6 @@ async function pushText(text) {
     },
     timeout: 30000,
   });
-}
-
-async function pushMany(bubbles) {
-  for (const b of bubbles) {
-    await pushText(b);
-    await new Promise((r) => setTimeout(r, 300));
-  }
 }
 
 // ---- スクレイピング本体（高速化） ----
@@ -137,32 +131,25 @@ async function scrapeTrends() {
   }
 }
 
-// ---- 実行（10件ずつ別バブル＋順位ごと改行）----
+// ---- 実行（1通でCRLF改行して送信）----
 (async () => {
   try {
     const ranks = await scrapeTrends(); // ["1位 〇〇", ... "50位 △△"]
 
     const header =
-      `🕒 現在のＸトレンド（1〜50位）\n` +
+      `🕒 現在のＸトレンド（1〜50位）\r\n` +
       new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
 
     if (!ranks?.length) {
-      await pushText(`${header}\n\n※ 取得できませんでした。`);
+      await pushText(`${header}\r\n\r\n※ 取得できませんでした。`);
       return;
     }
 
-    // 1行ずつ（・付き）にして配列化
-    const lines = ranks.map((s) => `・${s}`);
+    // 1行ずつ（・付き）にして CRLF で結合
+    const body = ranks.map((s) => `・${s}`).join("\r\n");
 
-    // 10件ごとに分割して別バブルで送信（改行は \n）
-    const bubbles = [];
-    for (let i = 0; i < lines.length; i += 10) {
-      const slice = lines.slice(i, i + 10).join("\n");
-      const rangeLabel = `${i + 1}〜${Math.min(i + 10, lines.length)}位`;
-      bubbles.push(`${i === 0 ? header + "\n\n" : `（続き：${rangeLabel}）\n\n`}${slice}`);
-    }
-
-    await pushMany(bubbles);
+    // 1通で送信（約1500〜2500文字想定 → LINE上限5000字以内）
+    await pushText(`${header}\r\n\r\n${body}`);
   } catch (err) {
     try {
       await pushText(`❗スクレイプ失敗: ${String(err).slice(0, 200)}`);
