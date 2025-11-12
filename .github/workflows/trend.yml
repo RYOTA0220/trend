@@ -2,7 +2,7 @@ name: Push Twittrend to LINE Group
 
 on:
   schedule:
-    # 例: 毎時 02分 / 32分 に送信（お好みで変更OK）
+    # 例: 毎時 02分 / 32分（お好みで変更OK）
     - cron: "2,32 * * * *"
   workflow_dispatch:
 
@@ -12,24 +12,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Node を入れる（※ lock file が無いので cache オプションは使わない）
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          # npm キャッシュ（package-lock が無くても npm のキャッシュは効く）
-          cache: 'npm'
 
-      # ★ Playwright ブラウザ＆npm のキャッシュ
+      # ✅ Playwright と npm キャッシュ（lock file なしでもOKな方法）
       - name: Cache Playwright and npm
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/ms-playwright
             ~/.npm
-          key: ${{ runner.os }}-pw-${{ hashFiles('**/package-lock.json') }}
+          # lock file が無くても動くように固定キーでOK（必要なら v2 に変えるだけでリフレッシュ）
+          key: ${{ runner.os }}-playwright-npm-cache-v1
           restore-keys: |
-            ${{ runner.os }}-pw-
+            ${{ runner.os }}-playwright-npm-cache-
 
-      # 依存導入（lock が無い構成を想定して直接インストール）
+      # 依存導入（package.json なし運用）
       - run: npm i playwright axios
 
       # ブラウザ（キャッシュがあれば一瞬）
