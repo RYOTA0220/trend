@@ -1,5 +1,5 @@
 // 現在（左端列）の「21位以下を見る」をクリック → 1〜50位を取得
-// 1通のメッセージで「順位ごとに確実に改行（CRLF）」して送信
+// 1通のメッセージで「順位ごとに改行」して送信
 const { chromium } = require("playwright");
 const axios = require("axios");
 
@@ -11,14 +11,14 @@ const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
 // ---- LINE送信ユーティリティ ----
+// 改行(\n, \r)は残す！それ以外の制御文字だけ除去する。
 const sanitize = (s) =>
   (s || "")
-    .replace(/[\u0000-\u001F\u007F]/g, "") // 制御文字除去
-    .replace(/\u2028|\u2029/g, "\r\n")     // Unicode改行もCRLFに統一
-    .replace(/[ \t\v\f]+\r?\n/g, "\r\n");  // 改行前の空白を整理
+    .replace(/[\u0000-\u0009\u000B\u000C\u000E-\u001F\u007F]/g, "") // \n(\u000A)と\r(\u000D)は除外
+    .replace(/\u2028|\u2029/g, "\n") // Unicodeの改行は通常改行に
+    .replace(/[ \t\v\f]+\r?\n/g, "\n"); // 改行前の余分な空白を整理
 
 async function pushText(text) {
-  // 1通で送る（5,000文字制限内）
   const payload = {
     to: GROUP_ID,
     messages: [{ type: "text", text: sanitize(text) }],
@@ -131,25 +131,24 @@ async function scrapeTrends() {
   }
 }
 
-// ---- 実行（1通でCRLF改行して送信）----
+// ---- 実行（1通で改行して送信）----
 (async () => {
   try {
     const ranks = await scrapeTrends(); // ["1位 〇〇", ... "50位 △△"]
 
     const header =
-      `🕒 現在のＸトレンド（1〜50位）\r\n` +
+      `🕒 現在のＸトレンド（1〜50位）\n` +
       new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
 
     if (!ranks?.length) {
-      await pushText(`${header}\r\n\r\n※ 取得できませんでした。`);
+      await pushText(`${header}\n\n※ 取得できませんでした。`);
       return;
     }
 
-    // 1行ずつ（・付き）にして CRLF で結合
-    const body = ranks.map((s) => `・${s}`).join("\r\n");
+    // 1行ずつ（・付き）で \n 連結（sanitize で改行は保持）
+    const body = ranks.map((s) => `・${s}`).join("\n");
 
-    // 1通で送信（約1500〜2500文字想定 → LINE上限5000字以内）
-    await pushText(`${header}\r\n\r\n${body}`);
+    await pushText(`${header}\n\n${body}`);
   } catch (err) {
     try {
       await pushText(`❗スクレイプ失敗: ${String(err).slice(0, 200)}`);
