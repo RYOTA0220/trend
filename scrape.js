@@ -1,167 +1,159 @@
 // scrape.js
-// Twitttrend（日本のトレンド）→「現在」→「21位以下を見る」→1〜50位取得→LINEに1通送信
-// 速度最優先：広告/画像/フォント/recaptchaをブロック、確実性：DOM条件で厳密待機
+// 要: 環境変数 LINE_CHANNEL_ACCESS_TOKEN, LINE_GROUP_ID
+// 動作: Twittrend から「現在」の50位までを取得 → LINEグループへ1通で送信
 
 const { chromium } = require('playwright');
 const axios = require('axios');
 
-const TWITTREND_URL = 'https://twitttrend.deno.dev/jp';
-
-const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || process.env.TOKEN; // どちらでも可
-const LINE_TO = process.env.LINE_GROUP_ID || process.env.LINE_USER_ID || process.env.LINE_TO; // 送信先ID（グループID推奨）
+const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+const LINE_TO = process.env.LINE_GROUP_ID; // グループID
 
 if (!LINE_TOKEN || !LINE_TO) {
-  console.error('❌ 環境変数が足りません: LINE_CHANNEL_ACCESS_TOKEN と LINE_GROUP_ID (または LINE_TO) を設定してください。');
+  console.error('環境変数が足りません: LINE_CHANNEL_ACCESS_TOKEN と LINE_GROUP_ID を設定してください。');
   process.exit(1);
 }
 
-// --- ネットワークブロック設定（高速＆安定化） ---
-const BLOCKED_HOST_PAT = /(doubleclick|googlesyndication|adservice|googletagservices|google-analytics|gpt|recaptcha|analytics)\./i;
-const BLOCKED_TYPES = new Set(['image', 'media', 'font']);
+const TWITTREND_URL = 'https://twittrend.jp/jp';
 
-// --- ユーティリティ ---
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const nowJST = () => {
-  const d = new Date();
-  const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${jst.getFullYear()}/${pad(jst.getMonth() + 1)}/${pad(jst.getDate())} ${pad(jst.getHours())}:${pad(jst.getMinutes())}:${pad(jst.getSeconds())}`;
-};
+async function pushToLINE(text) {
+  const endpoint = 'https://api.line.me/v2/bot/message/push';
 
-// LINE 文字数制限（約5000字）対策：基本は1通で収まるが、超えたら分割
-async function pushLine(text) {
-  const MAX = 4800; // 余裕を持たせる
+  // 文字数上限対策（5,000文字程度）。安全側で4,500文字で分割。
   const chunks = [];
-  if (text.length <= MAX) {
-    chunks.push(text);
-  } else {
-    let buf = '';
-    for (const line of text.split('\n')) {
-      if ((buf + '\n' + line).length > MAX) {
-        chunks.push(buf);
-        buf = line;
-      } else {
-        buf = buf ? buf + '\n' + line : line;
-      }
+  let buf = '';
+  for (const line of text.split('\n')) {
+    if ((buf + '\n' + line).length > 4500) {
+      chunks.push(buf);
+      buf = line;
+    } else {
+      buf = buf ? buf + '\n' + line : line;
     }
-    if (buf) chunks.push(buf);
   }
+  if (buf) chunks.push(buf);
 
-  for (const body of chunks) {
+  for (const chunk of chunks) {
     await axios.post(
-      'https://api.line.me/v2/bot/message/push',
-      { to: LINE_TO, messages: [{ type: 'text', text: body }] },
-      { headers: { Authorization: `Bearer ${LINE_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+      endpoint,
+      {
+        to: LINE_TO,
+        messages: [{ type: 'text', text: chunk }],
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${LINE_TOKEN}`,
+        },
+        timeout: 20000,
+      }
     );
-    await sleep(400); // 連投間隔
   }
 }
 
-(async () => {
+async function scrapeTwittrend() {
   const browser = await chromium.launch({
-    headless: 'shell',              // GitHub Actions で高速
-    args: ['--no-sandbox','--disable-setuid-sandbox']
+    headless: true,
+    args: [
+      '--disable-dev-shm-usage',
+      '--no-sandbox',
+      '--disable-gpu',
+      '--disable-setuid-sandbox',
+    ],
   });
 
   const context = await browser.newContext({
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
-    viewport: { width: 1366, height: 2000 }, // 縦長でスクロール減らす
+    // 軽量化（画像やフォントの読み込みを抑制）
     javaScriptEnabled: true,
+    viewport: { width: 1366, height: 2000 },
+    userAgent:
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+  });
+
+  // 広告・トラッキング由来の遷移やreCAPTCHAを極力避ける
+  await context.route('**/*', (route) => {
+    const url = route.request().url();
+    const block = [
+      'doubleclick.net',
+      'googlesyndication.com',
+      'google-analytics.com',
+      'adservice.google.com',
+      'adsystem.com',
+      'sodar2/runner.html', // ログに出ていたページ
+      'recaptcha',
+      '/ads?',
+    ].some((p) => url.includes(p));
+
+    if (block) route.abort();
+    else route.continue();
   });
 
   const page = await context.newPage();
+  page.setDefaultTimeout(30000);
 
-  // 全リクエストのフィルタ
-  await page.route('**/*', (route) => {
-    const req = route.request();
-    const url = req.url();
-    const type = req.resourceType();
-    if (BLOCKED_TYPES.has(type) || BLOCKED_HOST_PAT.test(url)) {
-      return route.abort();
-    }
-    return route.continue();
-  });
-
-  // ページ全体のデフォルトタイムアウト
-  page.setDefaultTimeout(45000);
-
-  console.log('[scrape] ▶ ページ遷移開始');
-  await page.goto(TWITTREND_URL, { waitUntil: 'domcontentloaded' });
-
-  // 「現在」セクションを特定（見出し h2: 現在）
-  const currentSection = page.locator('section').filter({
-    has: page.locator('h2', { hasText: '現在' })
-  }).first();
-
-  await currentSection.waitFor({ state: 'visible' });
-
-  // そのセクション内へスクロールしてボタンが見える状態に
-  await currentSection.scrollIntoViewIfNeeded();
-
-  // 「21位以下を見る」を “現在” セクション限定で取得
-  const viewMoreBtn = currentSection.getByRole('button', { name: '21位以下を見る' });
-
-  await viewMoreBtn.waitFor({ state: 'visible' });
-  console.log('[scrape] ▶ 「21位以下を見る」をクリック');
-  await viewMoreBtn.click({ delay: 30 });
-
-  // 50件そろうまで待つ（セクション内の <ol><li> が50以上）
-  console.log('[scrape] ▶ 50位まで読み込み待機');
-  await page.waitForFunction(
-    (section) => {
-      const ols = section.querySelectorAll('ol');
-      let count = 0;
-      ols.forEach((ol) => (count += ol.querySelectorAll('li').length));
-      return count >= 50;
-    },
-    await currentSection.elementHandle(),
-    { timeout: 35000 }
-  );
-
-  // 1〜50位を抽出（“現在” セクション内のみ）
-  const items = await currentSection.locator('ol li').allInnerTexts();
-
-  // 万一20件しか見えていない等の安全策でもう一度下端までスクロール→再計測
-  if (items.length < 50) {
-    await currentSection.evaluate((el) => el.scrollIntoView({ behavior: 'instant', block: 'end' }));
-    await page.waitForTimeout(800);
-  }
-  const texts = await currentSection.locator('ol li').allInnerTexts();
-
-  const top50 = texts.slice(0, 50).map((t) => {
-    // li 内の文を「N位 タイトル」形式へ整形
-    // 例: "1. ゴールデングラブ賞\n29,984件のツイート" → "1位 ゴールデングラブ賞"
-    const line = t.replace(/\r/g, '').split('\n')[0] || t.trim();
-    const m = line.match(/^\s*(\d+)\.\s*(.+)$/);
-    if (m) return `${m[1]}位 ${m[2].trim()}`;
-    return line.replace(/^\s*•\s*/, '').trim();
-  });
-
-  if (top50.length < 50) {
-    throw new Error(`取得数が不足しています（${top50.length}/50）。サイトの構造が変わった可能性があります。`);
-  }
-
-  // 送信用メッセージ
-  const header = `🕒 現在のＸトレンド（1〜50位）\n${nowJST()}`;
-  const body = header + '\n' + top50.join('\n');
-
-  console.log('[scrape] ▶ LINE送信開始');
-  await pushLine(body);
-  console.log('[scrape] ✅ 完了');
-
-  await browser.close();
-})().catch(async (err) => {
-  console.error('❌ スクレイプ失敗:', err?.message || err);
-  // 失敗通知（任意）
   try {
-    if (LINE_TOKEN && LINE_TO) {
-      await axios.post(
-        'https://api.line.me/v2/bot/message/push',
-        { to: LINE_TO, messages: [{ type: 'text', text: `❗スクレイプ失敗: ${err?.message || err}` }] },
-        { headers: { Authorization: `Bearer ${LINE_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 10000 }
-      );
-    }
-  } catch {}
+    // 1) アクセス
+    await page.goto(TWITTREND_URL, { waitUntil: 'domcontentloaded' });
+
+    // 2) 下にスクロール（カード群が出る位置まで）
+    await page.mouse.wheel(0, 2000);
+    await page.waitForTimeout(600);
+
+    // 3) 「現在」セクションを特定
+    const currentSection = page.locator('section').filter({
+      has: page.locator('h2:has-text("現在")'),
+    }).first();
+
+    await currentSection.waitFor({ state: 'visible' });
+
+    // 4) 「21位以下を見る」（現在の列のボタン）をクリック
+    const showMoreBtn = currentSection.locator('text=21位以下を見る').first();
+    await showMoreBtn.scrollIntoViewIfNeeded();
+    await Promise.all([
+      page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {}),
+      showMoreBtn.click({ timeout: 5000 }),
+    ]);
+
+    // 5) 50位までレンダリング完了を待つ
+    await currentSection.locator('ol li').nth(49).waitFor({ state: 'visible' });
+
+    // 6) ランキング抽出
+    const items = await currentSection.locator('ol li').allTextContents();
+
+    // 念のため50件に揃える
+    const top50 = items.slice(0, 50).map((t, i) => {
+      // 「29,984件のツイート」などのサブテキストを除去（見やすさ優先）
+      const clean = t.replace(/\s*\d{1,3}(,\d{3})*件のツイート\s*/g, '').trim();
+      return `${i + 1}位 ${clean}`;
+    });
+
+    const now = new Date();
+    const jp = new Intl.DateTimeFormat('ja-JP', {
+      timeZone: 'Asia/Tokyo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(now);
+
+    const header = `🕒 現在のＸトレンド（1〜50位）\n${jp}`;
+    const message = header + '\n' + top50.join('\n');
+
+    // 7) LINE送信（1通で改行付き）
+    await pushToLINE(message);
+    console.log('✅ LINE送信完了');
+  } finally {
+    await context.close();
+    await browser.close();
+  }
+}
+
+scrapeTwittrend().catch(async (e) => {
+  console.error('❌ スクレイプ失敗:', e);
+  // 最低限のエラー通知
+  try {
+    await pushToLINE('⚠️ スクレイプ失敗: ' + (e?.message || e));
+  } catch (_) {}
   process.exit(1);
 });
