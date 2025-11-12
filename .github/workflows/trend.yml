@@ -5,9 +5,10 @@ on:
     types: [run-scrape]
   workflow_dispatch: {}
   schedule:
+    # JST: 6:00, 12:00, 17:00, 20:00
     - cron: '0 21 * * *'
-    - cron: '0 3 * * *'
-    - cron: '0 8 * * *'
+    - cron: '0 3  * * *'
+    - cron: '0 8  * * *'
     - cron: '0 11 * * *'
 
 jobs:
@@ -19,28 +20,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Use Node 20
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # ← ここで "playwright" を入れる（core ではない）
       - name: Install deps (playwright & axios)
         run: |
           npm i -y playwright@1.48.2 axios
 
-      # ブラウザ(Chromium)をDL
       - name: Install Chromium for Playwright
-        run: |
-          npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium
 
-      - name: Debug env presence
-        run: |
-          [[ -n "${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}" ]] && echo "LINE_TOKEN OK" || (echo "LINE_TOKEN NG"; exit 1)
-          [[ -n "${{ secrets.LINE_GROUP_ID }}" ]] && echo "LINE_GROUP_ID OK" || (echo "GROUP_ID NG"; exit 1)
+      # 2回目以降を速くする（ms-playwright キャッシュ）
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-msplaywright-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-msplaywright-
 
       - name: Run scraper
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_GROUP_ID: ${{ secrets.LINE_GROUP_ID }}
+          LINE_GROUP_ID: ${{ vars.LINE_GROUP_ID }}
         run: node scrape.js
