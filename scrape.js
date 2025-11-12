@@ -1,79 +1,91 @@
 // scrape.js
 const { chromium } = require('playwright');
-const axios = require('axios');
+const fetch = require('node-fetch');
 
-const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-const LINE_TO    = process.env.LINE_GROUP_ID;
-
-if (!LINE_TOKEN || !LINE_TO) {
-  console.error('環境変数が足りません: LINE_CHANNEL_ACCESS_TOKEN / LINE_GROUP_ID');
-  process.exit(1);
-}
-
-const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
+const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;  // GitHub Secrets
+const LINE_TO    = process.env.LINE_GROUP_ID;              // グループID or ユーザID
 
 (async () => {
   const browser = await chromium.launch({ headless: true });
-  const ctx = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119 Safari/537.36',
-    viewport: { width: 1366, height: 900 }
+  const context = await browser.newContext({
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+    viewport: { width: 1400, height: 1000 },
   });
-  const page = await ctx.newPage();
+  const page = await context.newPage();
+  page.setDefaultTimeout(45_000);
 
   try {
-    // 1) アクセス
-    await page.goto('https://twittrend.jp/', { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(()=>{});
+    console.log('[nav] goto twittrend');
+    await page.goto('https://twittrend.jp/', { waitUntil: 'domcontentloaded' });
 
-    // 2) ちょいスクロール（ボタンを画面内へ）
-    await page.mouse.wheel(0, 800);
-    await sleep(300);
+    // ちょいスクロールしてレイアウト確定
+    await page.mouse.wheel(0, 1200);
 
-    // 3) 「現在」列の "21位以下を見る" をクリック（id 固定：#more_btn_now）
-    const seeMoreNow = page.locator('#more_btn_now');
-    await seeMoreNow.waitFor({ state: 'attached', timeout: 10_000 });
-    await seeMoreNow.scrollIntoViewIfNeeded();
-    await seeMoreNow.click({ timeout: 10_000 });
+    // 「現在」セクションを Playwright のロケータで特定
+    const currentSection = page
+      .locator('section')
+      .filter({ has: page.getByRole('heading', { name: '現在' }) })
+      .first();
 
-    // 4) 「現在」列だけの LI を 50件揃うまで待つ
-    // 　パネルIDは #panel_now（中に <ol><li>...）
-    const nowLis = page.locator('#panel_now ol li');
-    await page.waitForFunction(
-      (sel) => document.querySelectorAll(sel).length >= 50,
-      '#panel_now ol li',
-      { timeout: 30_000 }
-    );
+    // 左端カラムの「21位以下を見る」を押す（セクション内で限定）
+    const moreBtn = currentSection.getByRole('button', { name: '21位以下を見る' });
+    await moreBtn.scrollIntoViewIfNeeded();
+    await moreBtn.click();
 
-    // 5) 1〜50位を抽出（順位ごとに改行）
-    const items = await nowLis.evaluateAll(nodes =>
-      nodes.slice(0,50).map((li,i) => `${i+1}位 ${ (li.textContent||'').replace(/\s+/g,' ').trim() }`)
-    );
-
-    const stamp = new Date().toISOString().replace('T',' ').slice(0,19);
-    const header = `🕒 現在のＸトレンド（1〜50位）\n${stamp}`;
-    const message = `${header}\n${items.join('\n')}`;
-
-    // 6) LINEへ一括送信（長すぎる時のみ分割）
-    const chunks = message.length <= 1900
-      ? [message]
-      : [ `${header}\n${items.slice(0,25).join('\n')}`, items.slice(25).join('\n') ];
-
-    for (const text of chunks) {
-      await axios.post(
-        'https://api.line.me/v2/bot/message/push',
-        { to: LINE_TO, messages: [{ type:'text', text }] },
-        { headers: { Authorization: `Bearer ${LINE_TOKEN}` } }
-      );
-      await sleep(200);
+    // 50件そろうまで待つ（最大 15s）
+    const listLoc = currentSection.locator('ol li');
+    let ok = false;
+    for (let i = 0; i < 30; i++) { // 30 * 500ms = 15s
+      const n = await listLoc.count();
+      if (n >= 50) { ok = true; break; }
+      await page.waitForTimeout(500);
     }
+    if (!ok) throw new Error('50位まで展開されませんでした');
 
-    console.log('✅ 送信完了');
+    // 1〜50 のテキストを抽出
+    const items = await listLoc.allTextContents(); // 50件分の "1. 〜" のテキストが入る
+    // もし番号が付与されていない場合は自前で付ける
+    const lines = items.slice(0, 50).map((t, i) => {
+      const clean = t.replace(/\s+/g, ' ').trim();
+      return `${i + 1}位 ${clean.replace(/^\d+\.\s*/, '')}`;
+    });
+
+    // ヘッダ＋本文（1送信で収まる）
+    const now = new Date();
+    const ts = now.toISOString().replace('T', ' ').slice(0, 19);
+    const header = `🕰 現在のＸトレンド（1〜50位）\n${ts}`;
+    const body = lines.join('\n');
+    const message = `${header}\n${body}`;
+
+    // LINE 送信
+    console.log('[line] push message len=', message.length);
+    await pushToLine(message);
+
+    console.log('[done] success');
+    await browser.close();
+    process.exit(0);
   } catch (e) {
-    console.error('❌ 失敗:', e.message);
-    throw e;
-  } finally {
-    await page.close().catch(()=>{});
-    await ctx.close().catch(()=>{});
-    await browser.close().catch(()=>{});
+    console.error('[error]', e);
+    await browser.close();
+    process.exit(1);
+  }
+
+  async function pushToLine(text) {
+    if (!LINE_TOKEN || !LINE_TO) {
+      throw new Error('環境変数 LINE_CHANNEL_ACCESS_TOKEN / LINE_GROUP_ID が未設定');
+    }
+    const res = await fetch('https://api.line.me/v2/bot/message/push', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${LINE_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ to: LINE_TO, messages: [{ type: 'text', text }] }),
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(`LINE Push failed: ${res.status} ${t}`);
+    }
   }
 })();
