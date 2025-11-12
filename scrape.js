@@ -1,36 +1,35 @@
 // scrape.js
+// Twittrend（Xトレンド）を取得してLINEに送信するスクリプト
 
 const { chromium } = require('playwright');
 const axios = require('axios');
 
-// —— 例外は必ずログへ ——
+// ===== 環境変数（GitHub Secrets or Worker経由）=====
+const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN; // LINEトークン
+const LINE_TO_ID = process.env.LINE_TO_ID;                 // 送信先グループIDなど
+const LINE_API = 'https://api.line.me/v2/bot/message/push';
+
+// ===== ログ & エラー処理 =====
+const log = (...a) => console.log('[scrape]', ...a);
 process.on('unhandledRejection', (e) => {
-  console.error('[unhandledRejection]', e?.stack || e);
+  console.error('[unhandledRejection]', e);
   process.exit(1);
 });
 process.on('uncaughtException', (e) => {
-  console.error('[uncaughtException]', e?.stack || e);
+  console.error('[uncaughtException]', e);
   process.exit(1);
 });
 
-const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN; // GitHub Secrets
-const LINE_TO_ID = process.env.LINE_TO_ID;                 // 送信先（グループID or userId）
-const LINE_API = 'https://api.line.me/v2/bot/message/push';
-
-const log = (...a) => console.log('[scrape]', ...a);
-
+// ===== LINE送信関数 =====
 async function sendLineText(to, text) {
-  if (!LINE_TOKEN) throw new Error('LINE_CHANNEL_ACCESS_TOKEN が未設定です（GitHub Secrets）');
+  if (!LINE_TOKEN) throw new Error('LINE_CHANNEL_ACCESS_TOKEN が未設定です');
   const headers = { Authorization: `Bearer ${LINE_TOKEN}` };
-  try {
-    const res = await axios.post(LINE_API, { to, messages: [{ type: 'text', text }] }, { headers });
-    log('LINE push status', res.status);
-  } catch (err) {
-    console.error('[LINE push error]', err.message, err.response?.data || '');
-    throw err;
-  }
+  const body = { to, messages: [{ type: 'text', text }] };
+  const res = await axios.post(LINE_API, body, { headers });
+  log('LINE送信完了:', res.status);
 }
 
+// ===== Twittrendスクレイプ =====
 async function scrapeTwittrend() {
   const browser = await chromium.launch({
     headless: true,
@@ -39,43 +38,61 @@ async function scrapeTwittrend() {
   const page = await browser.newPage({ viewport: { width: 1366, height: 1200 } });
 
   try {
-    log('open twittrend');
+    log('アクセス中...');
     await page.goto('https://twittrend.jp/', { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-    // 「日本のトレンド」→ 左端「現在」列の存在を待つ
-    await page.waitForSelector('section:has(h2:has-text("現在"))', { timeout: 30000 });
+    // 「現在」セクションを取得
+    const currentSection = page.locator('section').filter({
+      has: page.locator('h2', { hasText: '現在' }),
+    }).first();
 
-    // 左端「現在」列の「21位以下を見る」を押す（4列の一番左だけ）
-    const moreBtn = page.locator('section:has(h2:has-text("現在")) button:has-text("21位以下を")').first();
-    await moreBtn.scrollIntoViewIfNeeded();
-    await moreBtn.click({ timeout: 15000 });
+    await currentSection.scrollIntoViewIfNeeded();
 
-    // 50位まで描画されるのを待つ
-    await page.waitForFunction(
-      () => document.querySelectorAll('section:has(h2:has-text("現在")) ol li').length >= 50,
-      { timeout: 30000 }
-    );
+    // 「21位以下を見る」をクリック
+    const moreBtn = currentSection.getByRole('button', { name: '21位以下を見る' }).first();
+    await moreBtn.waitFor({ state: 'visible', timeout: 15000 });
+    await moreBtn.click();
 
-    // 1〜50位を取得（順位ごとに改行）
-    const items = await page.locator('section:has(h2:has-text("現在")) ol li').allTextContents();
-    const top50 = items.slice(0, 50).map((t, i) => `${i + 1}位 ${t.replace(/\s+/g, ' ').trim()}`);
+    // 50位まで表示されるまで待つ
+    const items = currentSection.locator('ol li');
+    await items.nth(49).waitFor({ state: 'visible', timeout: 30000 });
 
-    const ts = new Date().toLocaleString('ja-JP', { hour12: false });
-    const header = `🕒 現在のＸトレンド（1〜50位）\n${ts}`;
-    return `${header}\n${top50.join('\n')}`;
+    // ランキングを取得
+    const count = await items.count();
+    const lines = [];
+    for (let i = 0; i < Math.min(count, 50); i++) {
+      const li = items.nth(i);
+      let text = '';
+      if (await li.locator('a').first().isVisible().catch(() => false)) {
+        text = await li.locator('a').first().innerText();
+      } else {
+        text = await li.innerText();
+      }
+      text = text.replace(/\d{1,3}(,\d{3})*件のツイート/g, '').trim();
+      lines.push(`${i + 1}位 ${text}`);
+    }
+
+    const now = new Date(Date.now() + 9 * 60 * 60 * 1000);
+    const header = `🕒 現在のXトレンド（1〜50位）\n${now.toISOString().replace('T', ' ').slice(0, 19)}`;
+    return `${header}\n${lines.join('\n')}`;
+  } catch (err) {
+    console.error('スクレイプ失敗:', err);
+    throw err;
   } finally {
     await page.close().catch(() => {});
     await browser.close().catch(() => {});
   }
 }
 
+// ===== メイン処理 =====
 (async () => {
   const text = await scrapeTwittrend();
 
   if (!LINE_TO_ID) {
-    log('プレビュー（LINE_TO_ID 未設定）\n' + text.slice(0, 500) + ' ...');
+    log('LINE_TO_ID が未設定。結果プレビュー:\n' + text.slice(0, 300));
   } else {
     await sendLineText(LINE_TO_ID, text);
   }
-  log('done');
+
+  log('完了');
 })();
